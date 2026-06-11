@@ -3,11 +3,10 @@ import numpy as np
 import highspy
 from math import ceil
 
-# Type hint only; safe to leave even if the import path differs in your project.
-try:
-    from app.models.hexaly_microgrid_request import HexalyModelInput
-except Exception:  # pragma: no cover
-    HexalyModelInput = object
+# `input` is a plain SimpleNamespace; this is just a loose type-hint alias.
+# (Do NOT import from a module named `app` here — it collides with the Streamlit app.py
+#  and causes a circular import.)
+HexalyModelInput = object
 
 
 # --------------------------------------------------------------------------- #
