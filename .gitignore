@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Generated / cached at runtime (the app recreates these)
+inputs_download.xlsx
+tmy_*.csv
+solution.csv
+bom.csv
+st.log
+*.png
+
+# Local tool/config
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
