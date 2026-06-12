@@ -35,7 +35,7 @@ def cost_table(inputs, solution_data):
     diesel_kW = _rating(solution_data, "diesel")
     rows = []
     if inputs.has_solar:
-        inv_kW = max(INVERTER_SOLAR_RATIO * solar_kW, float(inputs.peak_load_kWh_per_h))
+        inv_kW = max(INVERTER_SOLAR_RATIO * solar_kW, float(inputs.inverter_min_kW))
         solar_cost_per_kW = float(inputs.panel["cost_per_kW"]) + float(inputs.per_kw_solar)
         rows.append(["Solar panels", solar_kW, "kW", solar_cost_per_kW * solar_kW])
         rows.append(["Inverter", inv_kW, "kW", float(inputs.inverter["cost_per_kW"]) * inv_kW])

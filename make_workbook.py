@@ -76,7 +76,10 @@ def build_setup(wb):
         ("Latitude", "lat", -3.314732, "PVGIS site latitude (decimal degrees)"),
         ("Longitude", "lon", 37.326358, "PVGIS site longitude (decimal degrees)"),
         ("Solar max", "solar_max_kW", 100000, "upper bound for solar sizing (kW)"),
+        ("Solar min", "solar_min_kW", 0, "lower bound — force at least this much solar (kW)"),
         ("Battery max", "battery_max_kWh", 100000, "upper bound for battery sizing (kWh)"),
+        ("Battery min", "battery_min_kWh", 0, "lower bound — force at least this much battery (kWh)"),
+        ("Diesel min", "diesel_min_kW", 0, "lower bound — force at least this much diesel (kW)"),
         ("", "", None, None),
         ("FUEL & TANK  (the diesel model is chosen above from 'diesel_generators')", "", None, None),
         ("Parameter", None, "Value", "Notes"),
@@ -158,11 +161,13 @@ def main():
                    ["Engineering+permits", "fixed", 6000.0, 1, "project", "design & permits"],
                    ["Transport", "fixed", 5.0, 700, "project", "unit_cost = $/km, qty = km"],
                    ["Cable length", "report_only", 0.0, 120, "project", "metres (reporting only)"]])
+    # load: hourly 1-day profile (hour, kWh) + a single 'peak_demand' (kW) used for inverter sizing
+    # (inverter >= 1.25 x peak_demand). Put the peak_demand value in the first row only.
+    _profile = [50, 50, 50, 50, 50, 60, 120, 200, 260, 300, 320, 300,
+                260, 300, 340, 360, 320, 260, 200, 150, 120, 90, 70, 50]
     build_catalog(wb, "load",
-                  ["hour", "kWh"],
-                  [[h, v] for h, v in enumerate(
-                      [50, 50, 50, 50, 50, 60, 120, 200, 260, 300, 320, 300,
-                       260, 300, 340, 360, 320, 260, 200, 150, 120, 90, 70, 50])])
+                  ["hour", "kWh", "peak_demand"],
+                  [[h, v, (360 if h == 0 else None)] for h, v in enumerate(_profile)])
 
     # selection dropdowns (reference the catalogue name columns)
     for key, sheet in [("solar_panel", "solar_panels"), ("battery", "batteries"),

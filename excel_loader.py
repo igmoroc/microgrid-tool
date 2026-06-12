@@ -31,10 +31,11 @@ REQUIRED = {
 # 'selection' + 'project' sheets. Diesel/tank/fuel params live alongside them and are optional.
 VALID_BASIS = {"per_kW", "per_kWh", "fixed", "report_only"}
 
-# Inverter sizing rule: inverter_kW = max(INVERTER_SOLAR_RATIO * solar_kW, load_kW).
+# Inverter sizing rule: inverter_kW = max(INVERTER_SOLAR_RATIO * solar_kW, INVERTER_PEAK_FACTOR * peak_demand).
 # Only the per-solar part scales with sizing, so the optimizer carries that fraction of the
-# inverter $/kW in eff_solar_cost_per_kW; the load-floor part is added in the BOM (run_microgrid).
+# inverter $/kW in eff_solar_cost_per_kW; the peak-demand floor is added in the BOM (run_microgrid).
 INVERTER_SOLAR_RATIO = 0.5
+INVERTER_PEAK_FACTOR = 1.25   # inverter must be at least 1.25 x the peak demand
 
 # PVGIS TMY site used when the project sheet has no (valid) lat/lon.
 DEFAULT_LAT, DEFAULT_LON = -3.314732, 37.326358
@@ -200,6 +201,12 @@ def load_inputs(path=DEFAULT_SOURCE):
     grid_max_frac = float(pget("grid_max_fraction", 0.20))   # NOTE: < 1 makes grid limit bind; drives sizing
     solar_max_kW = float(pget("solar_max_kW", 100000))
     battery_max_kWh = float(pget("battery_max_kWh", 100000))
+    solar_min_kW = float(pget("solar_min_kW", 0))          # minimum sizing limits (force at least this much)
+    battery_min_kWh = float(pget("battery_min_kWh", 0))
+    if solar_min_kW > solar_max_kW:
+        raise InputError(f"solar_min_kW ({solar_min_kW}) > solar_max_kW ({solar_max_kW}).")
+    if battery_min_kWh > battery_max_kWh:
+        raise InputError(f"battery_min_kWh ({battery_min_kWh}) > battery_max_kWh ({battery_max_kWh}).")
     day_hours = FIXED_DAY_HOURS
     max_diesel = FIXED_MAX_DIESEL
     lat = float(pget("lat", DEFAULT_LAT))                    # NOTE: PVGIS TMY site; add 'lat'/'lon' to project sheet
@@ -229,18 +236,27 @@ def load_inputs(path=DEFAULT_SOURCE):
         load_day_profile = [235.0] * 24
     daily_load_kWh = float(sum(load_day_profile))
     flat_load_kWh_per_h = daily_load_kWh / 24.0
-    peak_load_kWh_per_h = max(load_day_profile)   # inverter must cover the peak hour
+    peak_load_kWh_per_h = max(load_day_profile)
+
+    # Peak demand (kW) for inverter sizing: explicit 'peak_demand' column in the 'load' sheet,
+    # else fall back to the profile's peak hour. The inverter must be >= 1.25 x this peak.
+    peak_demand_kW = peak_load_kWh_per_h
+    if "load" in sheets and "peak_demand" in sheets["load"].columns:
+        vals = pd.to_numeric(sheets["load"]["peak_demand"], errors="coerce").dropna()
+        if len(vals):
+            peak_demand_kW = float(vals.max())
+    inverter_min_kW = INVERTER_PEAK_FACTOR * peak_demand_kW
 
     # Spec dicts — only the selected components go into sets/subsets (what the solver iterates).
     tech_specs, storage_specs = {}, {}
     if has_solar:
-        tech_specs["solar"] = {"size": None, "min_output": 0, "max_output": solar_max_kW,
+        tech_specs["solar"] = {"size": None, "min_output": solar_min_kW, "max_output": solar_max_kW,
                                "cost_per_kW": eff_solar_cost_per_kW,
                                "maintenance_per_kW": float(panel["maintenance_per_kW"]),
                                "existing_rating": 0, "lifetime": int(panel["lifetime"]),
                                "efficiency": 1.0, "module_capacity": float(panel["rating_W"]) / 1000.0}
     if has_battery:
-        storage_specs["li"] = {"size": None, "min_capacity": 0, "max_capacity": battery_max_kWh,
+        storage_specs["li"] = {"size": None, "min_capacity": battery_min_kWh, "max_capacity": battery_max_kWh,
                                "cost_per_kWh": eff_battery_cost_per_kWh,
                                "maintenance_per_kWh": float(battery["maintenance_per_kWh"]),
                                "existing_rating": 0, "lifetime": int(battery["lifetime"]),
@@ -262,7 +278,10 @@ def load_inputs(path=DEFAULT_SOURCE):
         else:
             d_cost, d_max = float(pget("diesel_cost_per_kW", 500)), float(pget("diesel_max_kW", 100000))
             d_life, d_maint = int(pget("diesel_lifetime", 15)), 0.0
-        tech_specs["diesel"] = {"size": None, "min_output": 0, "max_output": d_max,
+        d_min = float(pget("diesel_min_kW", 0))
+        if d_min > d_max:
+            raise InputError(f"diesel_min_kW ({d_min}) > diesel max ({d_max}).")
+        tech_specs["diesel"] = {"size": None, "min_output": d_min, "max_output": d_max,
                                 "cost_per_kW": d_cost, "maintenance_per_kW": d_maint, "existing_rating": 0,
                                 "lifetime": d_life, "efficiency": diesel_eff, "module_capacity": 10}
     tank_specs = {"diesel_fuel": {"size": None, "min_capacity": float(pget("tank_min_kWh", 0)),
@@ -299,6 +318,7 @@ def load_inputs(path=DEFAULT_SOURCE):
         eff_solar_cost_per_kW=eff_solar_cost_per_kW, eff_battery_cost_per_kWh=eff_battery_cost_per_kWh,
         per_kw_solar=per_kw_solar, per_kwh_batt=per_kwh_batt, fixed_cost=fixed_cost,
         flat_load_kWh_per_h=flat_load_kWh_per_h, peak_load_kWh_per_h=peak_load_kWh_per_h,
+        peak_demand_kW=peak_demand_kW, inverter_min_kW=inverter_min_kW,
         daily_load_kWh=daily_load_kWh, load_day_profile=load_day_profile, load_components=load_components,
         panel=panel, battery=battery, inverter=inverter, has_solar=has_solar, has_battery=has_battery,
         bos=bos.to_dict("records"), selection=sel,

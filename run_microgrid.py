@@ -111,8 +111,8 @@ def build_bom(inputs, solar_kW, batt_kWh, diesel_kW=0.0, tank_kWh=0.0):
     inverter_kW = panel_count = batt_modules = inv_units = 0
     cost_panels = cost_inv = cost_batt = 0.0
     if panel is not None and solar_kW > 0:
-        # Inverter sized as max(INVERTER_SOLAR_RATIO * solar, peak load): >= the peak, else half the solar.
-        inverter_kW = max(INVERTER_SOLAR_RATIO * solar_kW, float(inputs.peak_load_kWh_per_h))
+        # Inverter sized as max(INVERTER_SOLAR_RATIO * solar, 1.25 * peak demand): >= the peak floor, else half the solar.
+        inverter_kW = max(INVERTER_SOLAR_RATIO * solar_kW, float(inputs.inverter_min_kW))
         panel_count = math.ceil(solar_kW * 1000.0 / float(panel["rating_W"]))
         inv_units = math.ceil(inverter_kW / float(inverter["rating_kW"]))
         cost_panels = float(panel["cost_per_kW"]) * solar_kW
