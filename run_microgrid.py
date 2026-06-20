@@ -55,10 +55,13 @@ def read_tmy_ghi(path, n, col="G(h)", stc=1000.0):
 
 def make_timeseries(inputs, n=T):
     """Return (load, ghi) arrays of length n."""
-    # NOTE: load is the sheet's 24-h day profile tiled across all days (flat profile if the
-    #       'load' sheet uses name/kWh_per_day). Drop a load.csv (n rows) to override entirely.
+    # NOTE: load priority — a load.csv override, then the sheet's full hourly series (8760
+    #       values used directly, no tiling), then the 24-h day profile tiled across all days.
     if os.path.exists("load.csv"):
         load = _read_series("load.csv", n)
+    elif getattr(inputs, "load_hourly", None):
+        full = np.asarray(inputs.load_hourly, dtype=float)            # full hourly series (e.g. 8760)
+        load = full[:n] if len(full) >= n else np.tile(full, (n + len(full) - 1) // len(full))[:n]
     else:
         day = np.asarray(inputs.load_day_profile, dtype=float)        # 24 values
         load = np.tile(day, (n + len(day) - 1) // len(day))[:n]

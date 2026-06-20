@@ -32,6 +32,23 @@ def _add(h, expr, name=None):
         return h.addConstr(expr)
 
 
+# Hours per calendar month (non-leap). Used to bill monthly tariff service/demand charges.
+_MONTH_HOURS = [744, 672, 744, 720, 744, 720, 744, 744, 720, 744, 720, 744]
+
+
+def _month_groups(n):
+    """List of (start, end) hour ranges, one per month, covering the first n hours."""
+    groups, start = [], 0
+    for mh in _MONTH_HOURS:
+        if start >= n:
+            break
+        groups.append((start, min(start + mh, n)))
+        start += mh
+    if start < n:                       # horizon longer than a year -> remainder as one group
+        groups.append((start, n))
+    return groups or [(0, n)]
+
+
 # =========================================================================== #
 #  PASS 1 — continuous sizing + dispatch
 # =========================================================================== #
@@ -164,12 +181,31 @@ def optimize_microgrid(input: HexalyModelInput):
     timestep_hours = 1.0
 
 
-    if "tariff" not in df.columns:
-        grid_cost = 0.0
+    tariff = getattr(input, "tariff_spec", None)
+    service_cost = 0.0
+    if tariff is None:
+        grid_cost = (h.qsum([df["tariff"].iloc[hh] * X_g_h[hh] for hh in range(num_timesteps)])
+                     if "tariff" in df.columns else 0.0)
     else:
-        grid_cost = (
-            h.qsum([df["tariff"].iloc[hh] * X_g_h[hh] for hh in range(num_timesteps)])
-        )
+        # Monthly tariff: tiered energy on grid import + a demand charge on the monthly peak grid
+        # draw + a flat service charge. All rates are already converted to USD in the loader.
+        energy_terms, demand_terms = [], []
+        for (a, b) in _month_groups(num_timesteps):
+            grid_month = h.qsum([X_g_h[hh] for hh in range(a, b)])
+            if tariff["block_kWh"] > 0:                  # rising-block (e.g. D1): convex -> LP-friendly
+                e_high = h.addVariable(lb=0, ub=grid_specs["grid_capacity"] * (b - a))
+                _add(h, e_high >= grid_month - tariff["block_kWh"], f"Tariff block {a}")
+                energy_terms.append(tariff["block_rate"] * grid_month
+                                    + (tariff["energy_rate"] - tariff["block_rate"]) * e_high)
+            else:
+                energy_terms.append(tariff["energy_rate"] * grid_month)
+            if tariff["demand_per_kW_month"] > 0:        # demand charge on this month's peak import
+                peak_m = h.addVariable(lb=0, ub=grid_specs["grid_capacity"])
+                for hh in range(a, b):
+                    _add(h, peak_m >= X_g_h[hh], f"Grid peak {hh}")
+                demand_terms.append(tariff["demand_per_kW_month"] * peak_m)
+            service_cost += tariff["service_per_month"]
+        grid_cost = h.qsum(energy_terms + demand_terms)
 
     # Discourage simultaneous charge & discharge in the same hour (LP-friendly, no binaries):
     # a tiny penalty on total battery throughput (charge + discharge). Charging from solar
@@ -182,7 +218,7 @@ def optimize_microgrid(input: HexalyModelInput):
         + [X_dfs_bth[(b, hh)] for b in batteries for hh in range(num_timesteps)]
     )
 
-    total_cost = (tech_install_cost + storage_cost + fuel_storage_cost + grid_cost
+    total_cost = (tech_install_cost + storage_cost + fuel_storage_cost + grid_cost + service_cost
                   + fuel_purchase_costs + initial_fuel_cost
                   + annualized_fixed_cost + charge_discharge_penalty * battery_throughput)
     load_sum = float(df["total_energy_demand"].sum())
@@ -246,11 +282,13 @@ def optimize_microgrid(input: HexalyModelInput):
                      + storage_specs[b]["efficiency"] * charge - X_dfs_bth[(b, hh)],
                      f"Battery Storage Dynamics {hh}_{b}")
 
-    # Battery capacity constraints
+    # Battery capacity constraints. The lower SoC floor can vary by season (battery_dod_jan/jul).
+    soc_floor_hour = getattr(input, "soc_floor_hour", None)
     for hh in range(num_timesteps):
         for b in batteries:
+            floor = soc_floor_hour[hh] if soc_floor_hour else storage_specs[b]["dod"]
             _add(h, X_se_bh[(b, hh)] <= X_bkWh_b[b], f"Battery Upper Limit {hh}_{b}")
-            _add(h, X_se_bh[(b, hh)] >= storage_specs[b]["dod"] * X_bkWh_b[b], f"Battery Lower Limit {hh}_{b}")
+            _add(h, X_se_bh[(b, hh)] >= floor * X_bkWh_b[b], f"Battery Lower Limit {hh}_{b}")
 
     # Charging limits
     for b in batteries:
@@ -399,7 +437,7 @@ def optimize_microgrid(input: HexalyModelInput):
         "costs": {
             "technology_cost": safe_cost(tech_install_cost),
             "storage_cost": safe_cost(storage_cost),
-            "grid_cost": None if project_specs.get("offgrid", False) else safe_cost(grid_cost),
+            "grid_cost": None if project_specs.get("offgrid", False) else safe_cost(grid_cost) + service_cost,
             "fixed_cost": safe_cost(fixed_cost),
             "capex": max(0, sum(item.get("capex", 0) for item in solution_data.get("data", []))),
             "LCoE": safe_value(LCoE),

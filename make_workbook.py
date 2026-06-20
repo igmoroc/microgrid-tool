@@ -66,12 +66,12 @@ def build_setup(wb):
         ("Battery", "battery", "Pylontech_US5000", "match 'batteries'; blank = no battery"),
         ("Inverter", "inverter", "SMA_STP50", "match 'inverters'; required if solar"),
         ("Diesel", "diesel", "", "match a model in 'diesel_generators'; blank = no diesel"),
+        ("Tariff", "tariff", "T2", "match a row in 'tariff'; blank = flat grid_price"),
         ("", "", None, None),
         ("PROJECT", "", None, None),
         ("Parameter", None, "Value", "Notes"),
         ("Project lifetime", "lifetime", 20, "years"),
         ("Grid capacity", "grid_capacity_kW", 10000, "kW connection limit"),
-        ("Grid price", "grid_price", 0.15, "$/kWh"),
         ("Max grid fraction", "grid_max_fraction", 0.95, "max share of annual load from grid (<1 binds sizing)"),
         ("Latitude", "lat", -3.314732, "PVGIS site latitude (decimal degrees)"),
         ("Longitude", "lon", 37.326358, "PVGIS site longitude (decimal degrees)"),
@@ -80,6 +80,8 @@ def build_setup(wb):
         ("Battery max", "battery_max_kWh", 100000, "upper bound for battery sizing (kWh)"),
         ("Battery min", "battery_min_kWh", 0, "lower bound — force at least this much battery (kWh)"),
         ("Diesel min", "diesel_min_kW", 0, "lower bound — force at least this much diesel (kW)"),
+        ("Battery DoD (around Jan)", "battery_dod_jan", 0.2, "min SoC floor for months Oct-Mar (0.2 = use 80%)"),
+        ("Battery DoD (around Jul)", "battery_dod_jul", 0.2, "min SoC floor for months Apr-Sep (0.5 = use 50%)"),
         ("", "", None, None),
         ("FUEL & TANK  (the diesel model is chosen above from 'diesel_generators')", "", None, None),
         ("Parameter", None, "Value", "Notes"),
@@ -102,7 +104,7 @@ def build_setup(wb):
         a = ws.cell(row=r, column=1, value=key); a.font = BOLD; a.border = BORDER
         b = ws.cell(row=r, column=2, value=value); b.fill = INPUT; b.border = BORDER
         c = ws.cell(row=r, column=3, value=note); c.font = NOTE; c.border = BORDER
-        if key in ("solar_panel", "battery", "inverter", "diesel"):
+        if key in ("solar_panel", "battery", "inverter", "diesel", "tariff"):
             sel_value_cells[key] = f"B{r}"
         r += 1
 
@@ -151,6 +153,14 @@ def main():
                   [["Cat_C9_300", 450, 0.38, 300, 15, 5],
                    ["Cummins_C150", 500, 0.35, 150, 15, 6],
                    ["Perkins_50", 600, 0.33, 50, 12, 8]])
+    # Tariffs (TZS; converted to USD in excel_loader). block_kWh>0 = rising-block energy price.
+    build_catalog(wb, "tariff",
+                  ["name", "block_kWh", "block_rate_TZS", "energy_TZS_per_kWh",
+                   "service_TZS_per_month", "demand_TZS_per_kWp_month"],
+                  [["D1", 75, 100, 350, 0, 0],
+                   ["T1", 0, 0, 292, 0, 0],
+                   ["T2", 0, 0, 195, 14233, 15000],
+                   ["T3-MV", 0, 0, 157, 16769, 13200]])
     build_catalog(wb, "bos",
                   ["item", "basis", "unit_cost", "qty", "applies_to", "notes"],
                   [["DC cabling", "per_kW", 35.0, 1, "solar", "DC cable per installed kW"],
@@ -171,7 +181,7 @@ def main():
 
     # selection dropdowns (reference the catalogue name columns)
     for key, sheet in [("solar_panel", "solar_panels"), ("battery", "batteries"),
-                       ("inverter", "inverters"), ("diesel", "diesel_generators")]:
+                       ("inverter", "inverters"), ("diesel", "diesel_generators"), ("tariff", "tariff")]:
         dv = DataValidation(type="list", formula1=f"={sheet}!$A$2:$A$100", allow_blank=True)
         ws_setup.add_data_validation(dv)
         dv.add(ws_setup[sel_cells[key]])

@@ -75,18 +75,25 @@ with tab_cost:
     st.dataframe(reporting.lcoe_table(sol), use_container_width=True, hide_index=True)
 
 with tab_energy:
-    st.metric("Energy independence (share of load not from the grid)",
+    cc = reporting.co2_summary(sdf)
+    m1, m2 = st.columns(2)
+    m1.metric("Energy independence (share of load not from the grid)",
               f"{es['energy_independence_pct']:.1f}%")
+    m2.metric("CO₂ saved / year vs 100% grid",
+              f"{cc['offset_t']:,.0f} t", f"{cc['offset_pct']:.0f}% of {cc['baseline_t']:,.0f} t baseline")
     left, right = st.columns(2)
     with left:
         fig1, ax1 = plt.subplots(figsize=(5, 5))
         reporting.plot_energy_by_source(sdf, ax=ax1)
         st.pyplot(fig1)
     with right:
-        week = st.slider("Week of the year", 1, 52, 21)
-        fig2, ax2 = plt.subplots(figsize=(8, 4))
-        reporting.plot_dispatch(sdf, week=week, ax=ax2)
-        st.pyplot(fig2)
+        fig3, ax3 = plt.subplots(figsize=(5, 5))
+        reporting.plot_co2_pie(sdf, ax=ax3)
+        st.pyplot(fig3)
+    week = st.slider("Week of the year", 1, 52, 21)
+    fig2, ax2 = plt.subplots(figsize=(10, 4))
+    reporting.plot_dispatch(sdf, week=week, ax=ax2)
+    st.pyplot(fig2)
 
 with tab_bom:
     bom = reporting.bom_table(inputs, sol)

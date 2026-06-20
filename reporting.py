@@ -17,6 +17,8 @@ import matplotlib.pyplot as plt
 from excel_loader import INVERTER_SOLAR_RATIO
 from run_microgrid import build_bom, _sizing_from_solution
 
+CO2_GRID_G_PER_KWH = 380.0   # grid emission factor (gCO2 per kWh)
+
 
 def _rating(solution_data, type_):
     return next((float(d["rating"]) for d in solution_data["data"] if d["type"] == type_), 0.0)
@@ -232,4 +234,31 @@ def plot_dispatch(solution_df, start=0, hours=168, week=None, ax=None):
     ax.legend(loc="upper right", ncol=5, fontsize=8)
     ax.margins(x=0)
 
+    return ax
+
+
+def co2_summary(solution_df, g_per_kWh=CO2_GRID_G_PER_KWH):
+    """Annual CO2 (tonnes): the 100%-grid baseline vs the actual grid emissions, and the offset."""
+    load = float(solution_df["LOAD"].sum())
+    grid = float(_col(solution_df, "Power Purchased").sum())
+    to_t = g_per_kWh / 1e6                       # g/kWh -> tonnes per kWh
+    baseline_t = load * to_t                      # if 100% of the load came from the grid
+    grid_t = grid * to_t                          # actual grid emissions
+    offset_t = baseline_t - grid_t                # CO2 avoided (solar + battery + diesel share)
+    return {"baseline_t": baseline_t, "grid_t": grid_t, "offset_t": offset_t,
+            "offset_pct": (offset_t / baseline_t * 100.0) if baseline_t else 0.0}
+
+
+def plot_co2_pie(solution_df, ax=None):
+    """Pie of the 100%-grid CO2 baseline split into offset (avoided) vs remaining grid emissions."""
+    c = co2_summary(solution_df)
+    if ax is None:
+        _, ax = plt.subplots(figsize=(5, 5))
+    ax.pie([c["offset_t"], c["grid_t"]],
+           labels=[f"Offset\n{c['offset_t']:,.0f} t", f"Grid\n{c['grid_t']:,.0f} t"],
+           colors=["#27AE60", "#999999"], autopct="%1.1f%%", startangle=90,
+           wedgeprops={"edgecolor": "white"})
+    ax.axis("equal")
+    ax.set_title(f"CO₂ vs 100% grid  ({c['baseline_t']:,.0f} t/yr baseline)\n"
+                 f"{c['offset_t']:,.0f} t/yr saved  ({c['offset_pct']:.0f}%)")
     return ax

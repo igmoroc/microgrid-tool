@@ -40,6 +40,9 @@ INVERTER_PEAK_FACTOR = 1.25   # inverter must be at least 1.25 x the peak demand
 # PVGIS TMY site used when the project sheet has no (valid) lat/lon.
 DEFAULT_LAT, DEFAULT_LON = -3.314732, 37.326358
 
+# Tariff rates in the 'tariff' sheet are in TZS; divide by this to get USD.
+TZS_PER_USD = 2650.0
+
 # Fixed parameters (hardcoded; not editable from the sheet).
 FIXED_RESILIENCY_DAYS = 0
 FIXED_DAY_HOURS = 24.0
@@ -129,7 +132,7 @@ def _read_config(sheets):
             key = str(row.iloc[0]).strip()
             if key and key.lower() != "nan" and len(row) > 1:
                 kv[key] = row.iloc[1]
-        sel = {c: kv.get(c) for c in ("solar_panel", "battery", "inverter", "diesel")}
+        sel = {c: kv.get(c) for c in ("solar_panel", "battery", "inverter", "diesel", "tariff")}
         return sel, kv
     sel = {str(r["component"]): r["choice"] for _, r in sheets["selection"].iterrows()}
     return sel, sheets["project"].iloc[0].to_dict()
@@ -197,7 +200,29 @@ def load_inputs(path=DEFAULT_SOURCE):
         return default if pd.isna(v) else v
 
     grid_capacity = float(p["grid_capacity_kW"])
-    grid_price = float(p["grid_price"])
+
+    # Grid energy price ALWAYS comes from the selected tariff (rows in 'tariff' are TZS -> USD).
+    tariff_name = _sel_get(sel, "tariff")
+    if tariff_name is None:
+        raise InputError("Select a 'tariff' in setup — grid pricing comes from the 'tariff' sheet.")
+    if "tariff" not in sheets:
+        raise InputError("Missing 'tariff' sheet (grid pricing comes from it).")
+    tr = _pick(sheets["tariff"], "tariff", tariff_name)
+
+    def _trf(key, default=0.0):
+        v = tr.get(key, default)
+        return float(default if pd.isna(v) else v)
+
+    tariff_spec = {
+        "name": tariff_name,
+        "energy_rate": _trf("energy_TZS_per_kWh") / TZS_PER_USD,            # $/kWh (above block)
+        "block_kWh": _trf("block_kWh"),                                     # monthly tier threshold
+        "block_rate": _trf("block_rate_TZS") / TZS_PER_USD,                # $/kWh (below block)
+        "service_per_month": _trf("service_TZS_per_month") / TZS_PER_USD,  # $/month fixed
+        "demand_per_kW_month": _trf("demand_TZS_per_kWp_month") / TZS_PER_USD,  # $/kW-peak/month
+    }
+    grid_price = tariff_spec["energy_rate"]   # used for the df 'tariff' column / reporting
+
     grid_max_frac = float(pget("grid_max_fraction", 0.20))   # NOTE: < 1 makes grid limit bind; drives sizing
     solar_max_kW = float(pget("solar_max_kW", 100000))
     battery_max_kWh = float(pget("battery_max_kWh", 100000))
@@ -207,6 +232,10 @@ def load_inputs(path=DEFAULT_SOURCE):
         raise InputError(f"solar_min_kW ({solar_min_kW}) > solar_max_kW ({solar_max_kW}).")
     if battery_min_kWh > battery_max_kWh:
         raise InputError(f"battery_min_kWh ({battery_min_kWh}) > battery_max_kWh ({battery_max_kWh}).")
+    # Operational battery DoD floor (minimum SoC) — an independent Setup input, NOT the battery
+    # catalogue spec. Months Apr-Sep ("around July") use battery_dod_jul; Oct-Mar use battery_dod_jan.
+    battery_dod_jan = float(pget("battery_dod_jan", 0.2))
+    battery_dod_jul = float(pget("battery_dod_jul", 0.2))
     day_hours = FIXED_DAY_HOURS
     max_diesel = FIXED_MAX_DIESEL
     lat = float(pget("lat", DEFAULT_LAT))                    # NOTE: PVGIS TMY site; add 'lat'/'lon' to project sheet
@@ -218,25 +247,38 @@ def load_inputs(path=DEFAULT_SOURCE):
               f"format. Using default ({DEFAULT_LAT}, {DEFAULT_LON}).")
         lat, lon = DEFAULT_LAT, DEFAULT_LON
 
-    # Load from the optional 'load' sheet. Two accepted formats:
-    #   hourly 1-day profile : columns 'hour' (0-23) + 'kWh'   -> tiled to every day (run_microgrid)
-    #   flat components       : columns 'name' + 'kWh_per_day' -> summed, spread evenly over 24 h
-    # Either way it is exposed as a 24-value day profile that run_microgrid repeats to 8760 h.
-    if "load" in sheets and {"hour", "kWh"}.issubset(sheets["load"].columns):
+    # Load from the optional 'load' sheet. Accepted formats:
+    #   full year     : a 'kWh' column with 8760 values (no 'hour') -> used directly, no timestamp
+    #   1-day profile : 'hour' (0-23) + 'kWh' (24 rows)             -> tiled to every day
+    #   flat          : 'name' + 'kWh_per_day'                      -> summed, spread evenly
+    # `load_hourly` (full series) takes priority in run_microgrid; otherwise the 24-value
+    # `load_day_profile` is tiled to 8760 h.
+    load_hourly = None
+    if ("load" in sheets and {"hour", "kWh"}.issubset(sheets["load"].columns)
+            and len(sheets["load"]) == 24):
+        # 24-row daily profile, tiled to every day
         ld = sheets["load"].sort_values("hour")
         load_day_profile = [float(v) for v in ld["kWh"]]
-        if len(load_day_profile) != 24:
-            raise InputError(f"'load' sheet (hour/kWh) must have 24 rows; got {len(load_day_profile)}.")
         load_components = ld.to_dict("records")
+    elif "load" in sheets and "kWh" in sheets["load"].columns:
+        # full hourly series (8760) used directly, in row order — an 'hour' column is ignored here
+        vals = pd.to_numeric(sheets["load"]["kWh"], errors="coerce").dropna()
+        load_hourly = [float(v) for v in vals]
+        if len(load_hourly) < 24:
+            raise InputError(f"'load' sheet 'kWh' column has only {len(load_hourly)} values; expected a full series (8760).")
+        load_day_profile = load_hourly[:24]
+        load_components = []
     elif "load" in sheets and {"name", "kWh_per_day"}.issubset(sheets["load"].columns):
         load_components = sheets["load"].to_dict("records")
         load_day_profile = [float(sheets["load"]["kWh_per_day"].sum()) / 24.0] * 24
     else:
         load_components = []
         load_day_profile = [235.0] * 24
-    daily_load_kWh = float(sum(load_day_profile))
-    flat_load_kWh_per_h = daily_load_kWh / 24.0
-    peak_load_kWh_per_h = max(load_day_profile)
+
+    _load_series = load_hourly if load_hourly is not None else load_day_profile
+    flat_load_kWh_per_h = float(sum(_load_series)) / len(_load_series)
+    daily_load_kWh = flat_load_kWh_per_h * 24.0
+    peak_load_kWh_per_h = max(_load_series)
 
     # Peak demand (kW) for inverter sizing: explicit 'peak_demand' column in the 'load' sheet,
     # else fall back to the profile's peak hour. The inverter must be >= 1.25 x this peak.
@@ -318,8 +360,10 @@ def load_inputs(path=DEFAULT_SOURCE):
         eff_solar_cost_per_kW=eff_solar_cost_per_kW, eff_battery_cost_per_kWh=eff_battery_cost_per_kWh,
         per_kw_solar=per_kw_solar, per_kwh_batt=per_kwh_batt, fixed_cost=fixed_cost,
         flat_load_kWh_per_h=flat_load_kWh_per_h, peak_load_kWh_per_h=peak_load_kWh_per_h,
-        peak_demand_kW=peak_demand_kW, inverter_min_kW=inverter_min_kW,
-        daily_load_kWh=daily_load_kWh, load_day_profile=load_day_profile, load_components=load_components,
+        peak_demand_kW=peak_demand_kW, inverter_min_kW=inverter_min_kW, tariff_spec=tariff_spec,
+        battery_dod_jan=battery_dod_jan, battery_dod_jul=battery_dod_jul,
+        daily_load_kWh=daily_load_kWh, load_day_profile=load_day_profile, load_hourly=load_hourly,
+        load_components=load_components,
         panel=panel, battery=battery, inverter=inverter, has_solar=has_solar, has_battery=has_battery,
         bos=bos.to_dict("records"), selection=sel,
     )
@@ -336,10 +380,26 @@ def build_optimizer_input(inputs, df, num_timesteps):
     if "diesel" in techs:                       # diesel is always available (availability = 1)
         for hh in range(num_timesteps):
             f_l_t[("diesel", hh)] = 1.0
+
+    # Per-hour battery SoC floor: months Apr-Sep use the July-season DoD, Oct-Mar the January one.
+    soc_floor_hour = None
+    if "li" in inputs.storage_specs:
+        month_hours = [744, 672, 744, 720, 744, 720, 744, 744, 720, 744, 720, 744]
+        jul_season = {4, 5, 6, 7, 8, 9}
+        floors = []
+        for month, hours in enumerate(month_hours, start=1):
+            dod = inputs.battery_dod_jul if month in jul_season else inputs.battery_dod_jan
+            floors.extend([dod] * hours)
+        floors = floors[:num_timesteps]
+        while len(floors) < num_timesteps:                  # horizon beyond one year
+            floors.append(floors[-1] if floors else inputs.battery_dod_jan)
+        soc_floor_hour = floors
+
     return SimpleNamespace(
         storage_specs=inputs.storage_specs, project_specs=inputs.project_specs,
         tank_specs=inputs.tank_specs, grid_cut_hours=[], num_timesteps=num_timesteps,
         tech_specs=inputs.tech_specs, fuel_specs=inputs.fuel_specs, grid_specs=inputs.grid_specs,
         df=df, fuel_burn_rates=inputs.fuel_burn_rates, f_l_t=f_l_t,
-        sets=inputs.sets, subsets=inputs.subsets,
+        sets=inputs.sets, subsets=inputs.subsets, tariff_spec=getattr(inputs, "tariff_spec", None),
+        soc_floor_hour=soc_floor_hour,
     )
