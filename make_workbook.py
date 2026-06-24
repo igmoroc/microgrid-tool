@@ -73,6 +73,7 @@ def build_setup(wb):
         ("Project lifetime", "lifetime", 20, "years"),
         ("Grid capacity", "grid_capacity_kW", 10000, "kW connection limit"),
         ("Max grid fraction", "grid_max_fraction", 0.95, "max share of annual load from grid (<1 binds sizing)"),
+        ("Grid outage hours", "grid_cut_hours", "", "force grid import = 0, e.g. '3000-3003' or '100,200'"),
         ("Latitude", "lat", -3.314732, "PVGIS site latitude (decimal degrees)"),
         ("Longitude", "lon", 37.326358, "PVGIS site longitude (decimal degrees)"),
         ("Solar max", "solar_max_kW", 100000, "upper bound for solar sizing (kW)"),

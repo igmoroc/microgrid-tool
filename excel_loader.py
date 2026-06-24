@@ -122,6 +122,30 @@ def _sel_get(sel, key):
     return None if v.lower() in ("", "nan", "none") else v
 
 
+def _parse_hours(spec):
+    """Parse a grid-cut spec into a sorted list of hour ints. Accepts ranges (inclusive) and
+    single hours separated by commas, semicolons or spaces, e.g. '3000-3003, 5000  6200-6210'.
+    Tolerant of en/em dashes and stray text; unparseable tokens are skipped."""
+    text = str(spec).strip()
+    if not text or text.lower() in ("nan", "none"):
+        return []
+    text = text.replace("–", "-").replace("—", "-")   # en/em dash -> hyphen
+    text = re.sub(r"\s*-\s*", "-", text)                         # '3000 - 3003' -> '3000-3003'
+    text = re.sub(r"[;,]+", " ", text)                          # commas/semicolons -> spaces
+    hours = set()
+    for part in text.split():
+        m = re.match(r"^(\d+)-(\d+)$", part)
+        if m:                                                   # a range a-b (inclusive)
+            a, b = int(m.group(1)), int(m.group(2))
+            hours.update(range(min(a, b), max(a, b) + 1))
+            continue
+        try:
+            hours.add(int(float(part)))                        # a single hour (tolerate '3000.0')
+        except ValueError:
+            continue                                            # skip anything unparseable
+    return sorted(hours)
+
+
 def _read_config(sheets):
     """Return (selections, params) from the 'setup' key/value sheet (columns A=key, B=value),
     or from the legacy 'selection' + 'project' sheets."""
@@ -224,6 +248,7 @@ def load_inputs(path=DEFAULT_SOURCE):
     grid_price = tariff_spec["energy_rate"]   # used for the df 'tariff' column / reporting
 
     grid_max_frac = float(pget("grid_max_fraction", 0.20))   # NOTE: < 1 makes grid limit bind; drives sizing
+    grid_cut_hours = _parse_hours(pget("grid_cut_hours", ""))   # hours to force grid import = 0 (outage)
     solar_max_kW = float(pget("solar_max_kW", 100000))
     battery_max_kWh = float(pget("battery_max_kWh", 100000))
     solar_min_kW = float(pget("solar_min_kW", 0))          # minimum sizing limits (force at least this much)
@@ -361,7 +386,7 @@ def load_inputs(path=DEFAULT_SOURCE):
         per_kw_solar=per_kw_solar, per_kwh_batt=per_kwh_batt, fixed_cost=fixed_cost,
         flat_load_kWh_per_h=flat_load_kWh_per_h, peak_load_kWh_per_h=peak_load_kWh_per_h,
         peak_demand_kW=peak_demand_kW, inverter_min_kW=inverter_min_kW, tariff_spec=tariff_spec,
-        battery_dod_jan=battery_dod_jan, battery_dod_jul=battery_dod_jul,
+        battery_dod_jan=battery_dod_jan, battery_dod_jul=battery_dod_jul, grid_cut_hours=grid_cut_hours,
         daily_load_kWh=daily_load_kWh, load_day_profile=load_day_profile, load_hourly=load_hourly,
         load_components=load_components,
         panel=panel, battery=battery, inverter=inverter, has_solar=has_solar, has_battery=has_battery,
@@ -397,7 +422,7 @@ def build_optimizer_input(inputs, df, num_timesteps):
 
     return SimpleNamespace(
         storage_specs=inputs.storage_specs, project_specs=inputs.project_specs,
-        tank_specs=inputs.tank_specs, grid_cut_hours=[], num_timesteps=num_timesteps,
+        tank_specs=inputs.tank_specs, grid_cut_hours=getattr(inputs, "grid_cut_hours", []), num_timesteps=num_timesteps,
         tech_specs=inputs.tech_specs, fuel_specs=inputs.fuel_specs, grid_specs=inputs.grid_specs,
         df=df, fuel_burn_rates=inputs.fuel_burn_rates, f_l_t=f_l_t,
         sets=inputs.sets, subsets=inputs.subsets, tariff_spec=getattr(inputs, "tariff_spec", None),

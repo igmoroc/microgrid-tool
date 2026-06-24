@@ -321,6 +321,11 @@ def optimize_microgrid(input: HexalyModelInput):
         _add(h, X_g_h[hh] <= grid_specs["grid_capacity"],
              f"Grid Constraint {hh}")
 
+    # Grid outage: force grid import to 0 during the specified hours (load met by solar/battery/diesel).
+    for hh in grid_cut_hours:
+        if 0 <= hh < num_timesteps:
+            _add(h, X_g_h[hh] == 0, f"Grid cut {hh}")
+
     # Annual grid-energy share limit: total energy drawn from the grid over the year
     max_grid_fraction = project_specs.get("max_grid_fraction", 0.9)
     annual_grid_energy = (
